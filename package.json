@@ -1,0 +1,22 @@
+{
+  "name": "powerbi-mcp",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@azure/msal-node": "^3.8.0",
+    "@modelcontextprotocol/sdk": "^1.19.1",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "msal-node": "^0.0.1-security",
+    "node-fetch": "^2.7.0",
+    "uuid": "^13.0.0"
+  }
+}
