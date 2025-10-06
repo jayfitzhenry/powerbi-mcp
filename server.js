@@ -81,12 +81,12 @@ const app = express();
 app.use(express.json());
 
 // Simple API key check
-app.use((req, res, next) => {
-  if (req.header("Authorization") !== `Bearer ${API_KEY}`) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-  next();
-});
+//app.use((req, res, next) => {
+//  if (req.header("Authorization") !== `Bearer ${API_KEY}`) {
+//    return res.status(401).json({ error: "Unauthorized" });
+//  }
+//  next();
+//});
 
 const sessions = new Map();
 
