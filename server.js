@@ -64,17 +64,19 @@ async function pbiAdminFetch(pathAndQuery) {
   const token = await getAccessToken();
   const url = `https://api.powerbi.com/v1.0/myorg/admin${pathAndQuery}`;
 
+  console.log("[PBI REQUEST]", url); // ADD THIS LINE
+
   let res, text;
   try {
     res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
     text = await res.text();
   } catch (e) {
-    console.error("[PBI NETWORK ERROR]", String(e));
+    console.error("[PBI NETWORK ERROR]", url, String(e)); // ADD url HERE TOO
     return { ok: false, status: 0, errorText: String(e) };
   }
 
   if (!res.ok) {
-    console.error("[PBI ERROR]", res.status, pathAndQuery, text);
+    console.error("[PBI ERROR]", res.status, url, text); // CHANGE pathAndQuery TO url
     return { ok: false, status: res.status, errorText: text };
   }
 
