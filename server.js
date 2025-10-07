@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // ---------- Imports ----------
-import "dotenv/config";
+import 'dotenv/config';
 import express from "express";
 import fetch from "node-fetch";
 import { v4 as uuidv4 } from "uuid";
@@ -41,12 +41,11 @@ async function getAccessToken() {
   return tokenResponse.accessToken;
 }
 
-// Decode JWT (no verify) to inspect header/payload for diagnostics
+// Decode JWT (header/payload only, no verify) for diagnostics
 function decodeJwtNoVerify(jwt) {
   try {
     const [h, p] = jwt.split(".");
-    const pad = (s) =>
-      s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4);
+    const pad = s => s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4);
     const header = JSON.parse(Buffer.from(pad(h), "base64").toString("utf8"));
     const payload = JSON.parse(Buffer.from(pad(p), "base64").toString("utf8"));
     return { header, payload };
@@ -55,13 +54,19 @@ function decodeJwtNoVerify(jwt) {
   }
 }
 
-// Centralised fetch with rich logging
+// Centralised PBI fetch with rich logging
 async function pbiAdminFetch(pathAndQuery) {
   const token = await getAccessToken();
   const url = `https://api.powerbi.com/v1.0/myorg/admin${pathAndQuery}`;
 
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  const text = await res.text();
+  let res, text;
+  try {
+    res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    text = await res.text();
+  } catch (e) {
+    console.error("[PBI NETWORK ERROR]", String(e));
+    return { ok: false, status: 0, errorText: String(e) };
+  }
 
   if (!res.ok) {
     console.error("[PBI ERROR]", res.status, pathAndQuery, text);
@@ -69,11 +74,7 @@ async function pbiAdminFetch(pathAndQuery) {
   }
 
   let body = {};
-  try {
-    body = text ? JSON.parse(text) : {};
-  } catch {
-    body = {};
-  }
+  try { body = text ? JSON.parse(text) : {}; } catch { body = {}; }
   return { ok: true, status: res.status, body };
 }
 
@@ -104,14 +105,14 @@ async function pbiAdminCount(pathBaseWithScope, pageSize = 5000) {
 function buildMcpServer() {
   const server = new McpServer({
     name: "powerbi-admin-mcp-remote",
-    version: "1.1.0",
+    version: "1.2.0",
   });
 
-  const toErrorContent = (prefix, res) => [
-    { type: "text", text: `${prefix}: HTTP ${res.status}\n${res.errorText ?? "No body"}` },
-  ];
+  const toErrorContent = (prefix, res) => ([
+    { type: "text", text: `${prefix}: HTTP ${res.status}\n${res.errorText ?? "No body"}` }
+  ]);
 
-  // 0) Diagnostics: quick ping to admin API
+  // Diagnostics: quick admin ping
   server.tool(
     "diagnose_admin_ping",
     {
@@ -125,7 +126,7 @@ function buildMcpServer() {
     }
   );
 
-  // 0b) Diagnostics: show access token claims (audience/tenant/appid/roles)
+  // Diagnostics: show token claims (aud/app/tenant/roles)
   server.tool(
     "diagnose_token_claims",
     {
@@ -145,13 +146,11 @@ function buildMcpServer() {
             appid: payload.appid,
             tid: payload.tid,
             roles: payload.roles,
-            aio: payload.aio,
-            ver: payload.ver,
             iss: payload.iss,
             iat: payload.iat,
             nbf: payload.nbf,
             exp: payload.exp,
-          },
+          }
         };
         return { content: [{ type: "json", json: subset }] };
       } catch (e) {
@@ -160,7 +159,7 @@ function buildMcpServer() {
     }
   );
 
-  // 1) List workspaces
+  // List workspaces
   server.tool(
     "list_admin_groups",
     {
@@ -175,7 +174,7 @@ function buildMcpServer() {
     }
   );
 
-  // 2) Count datasets
+  // Count datasets
   server.tool(
     "count_admin_datasets",
     {
@@ -189,7 +188,7 @@ function buildMcpServer() {
     }
   );
 
-  // 3) Count reports
+  // Count reports
   server.tool(
     "count_admin_reports",
     {
@@ -203,7 +202,7 @@ function buildMcpServer() {
     }
   );
 
-  // 4) Combined counts
+  // Combined counts
   server.tool(
     "count_admin_assets",
     {
@@ -226,67 +225,70 @@ function buildMcpServer() {
 
 // ---------- Express App ----------
 const app = express();
-
-// CORS + preflight (adjust origin if you want to restrict it)
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, MCP-Session, MCP-Session-Id, X-MCP-Session"
-  );
-  res.setHeader(
-    "Access-Control-Expose-Headers",
-    "MCP-Session, MCP-Session-Id, X-MCP-Session"
-  );
-  if (req.method === "OPTIONS") return res.sendStatus(204);
-  next();
-});
-
 app.use(express.json());
 
-// Minimal logs (look for common session header variants)
+// Logs (helpful debugging)
 app.use((req, _res, next) => {
-  const ct = req.get("content-type");
-  const sid =
-    req.get("mcp-session") ||
-    req.get("mcp-session-id") ||
-    req.get("x-mcp-session");
-  console.log("[REQ]", req.method, req.path, "ctype:", ct, "mcp-session:", sid);
+  console.log(
+    "[REQ]",
+    req.method,
+    req.path,
+    "ctype:", req.header("content-type"),
+    "mcp-session:", req.header("Mcp-Session-Id")
+  );
   next();
 });
 
-// Friendly routes for platforms like Render
-app.get("/", (_req, res) => res.status(200).send("ok"));
+// Health/info
 app.get("/health", (_req, res) => res.json({ ok: true }));
-
-// Explicitly 404 well-known OAuth probes if you don't support OAuth
-app.get("/.well-known/*", (_req, res) => res.sendStatus(404));
-
-// GET liveness for MCP base path
 app.get(BASE_PATH, (_req, res) =>
-  res.json({
-    ok: true,
-    info: "MCP endpoint. POST JSON-RPC initialize first, then tools/call.",
-  })
+  res.json({ ok: true, info: "MCP endpoint. Register a session, then initialize, then tools/call." })
 );
 
-// ---------- MCP Transport (SDK manages sessions) ----------
-const transport = new StreamableHTTPServerTransport({
-  sessionIdGenerator: () => uuidv4(),
-});
-const mcpServer = buildMcpServer();
-mcpServer.connect(transport);
+// ---------- Session management (explicit) ----------
+/**
+ * Flow:
+ * 1) POST /register -> returns Mcp-Session-Id and prepares a transport bound to that id
+ * 2) POST /mcp (initialize/tools) must include Mcp-Session-Id from step 1
+ */
+const sessions = new Map(); // sid -> { transport, server }
 
-// Single handler for MCP endpoint (both GET probes and POST JSON-RPC)
+function createSession(sessionId) {
+  const server = buildMcpServer();
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => sessionId
+  });
+  server.connect(transport);
+  sessions.set(sessionId, { transport, server });
+}
+
+app.post("/register", (req, res) => {
+  const sid = uuidv4();
+  createSession(sid);
+  res.setHeader("Mcp-Session-Id", sid);
+  return res.status(201).json({ ok: true, mcpSessionId: sid });
+});
+
+// ---------- MCP endpoint (requires session id) ----------
 app.all(BASE_PATH, async (req, res) => {
-  try {
-    await transport.handleRequest(req, res, req.body);
-  } catch (e) {
-    console.error("[MCP handleRequest error]", e);
-    if (!res.headersSent) {
-      res.status(500).json({ error: "MCP transport error", detail: String(e) });
-    }
+  const sid = req.header("Mcp-Session-Id");
+  if (!sid) {
+    return res.status(400).json({ error: "Bad Request: Mcp-Session-Id header is required" });
   }
+  const session = sessions.get(sid);
+  if (!session) {
+    return res.status(404).json({ error: "Session not found" });
+  }
+
+  // Enforce Accept header for Streamable HTTP
+  const accept = (req.header("Accept") || "").toLowerCase();
+  if (!accept.includes("application/json") || !accept.includes("text/event-stream")) {
+    return res.status(406).json({
+      error: "Not Acceptable: Client must accept both application/json and text/event-stream"
+    });
+    }
+
+  await session.transport.handleRequest(req, res, req.body);
 });
 
 // ---------- Start ----------
