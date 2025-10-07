@@ -95,20 +95,32 @@ app.use((req, _res, next) => {
 });
 
 // ---------- Auth Middleware ----------
-// Allow "initialize" without auth, require API key for everything else.
+// Allow 'initialize' with no auth.
+// After that, allow any request that includes a valid Mcp-Session-Id
+// (i.e., part of an established MCP session). If neither, require API_KEY.
+
 app.use((req, res, next) => {
   if (req.path !== BASE_PATH) return next();
 
+  // 1) Allow initialize without auth
   if (req.method === "POST" && req.body?.method === "initialize") {
-    return next(); // allow Claude to start without auth
+    return next();
   }
 
+  // 2) Allow any request that belongs to an existing MCP session
+  const sid = req.header("Mcp-Session-Id");
+  if (sid && sessions.has(sid)) {
+    return next();
+  }
+
+  // 3) Fallback: allow with API key header (for curl/tests/desktop)
   const isAuthed = req.header("Authorization") === `Bearer ${API_KEY}`;
-  if (!isAuthed) {
-    return res.status(401).json({ error: "Unauthorized" });
+  if (isAuthed) {
+    return next();
   }
 
-  next();
+  // 4) Otherwise block
+  return res.status(401).json({ error: "Unauthorized" });
 });
 
 // ---------- MCP Session Handling ----------
