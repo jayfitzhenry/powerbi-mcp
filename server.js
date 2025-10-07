@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // ---------- Imports ----------
-import 'dotenv/config';
+import "dotenv/config";
 import express from "express";
 import fetch from "node-fetch";
 import { v4 as uuidv4 } from "uuid";
@@ -19,7 +19,6 @@ const {
 } = process.env;
 
 console.log("ENV OK?", !!TENANT_ID, !!CLIENT_ID, !!CLIENT_SECRET);
-
 if (!TENANT_ID || !CLIENT_ID || !CLIENT_SECRET) {
   console.error("Missing required env: TENANT_ID, CLIENT_ID, CLIENT_SECRET");
   process.exit(1);
@@ -46,7 +45,8 @@ async function getAccessToken() {
 function decodeJwtNoVerify(jwt) {
   try {
     const [h, p] = jwt.split(".");
-    const pad = (s) => s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4);
+    const pad = (s) =>
+      s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4);
     const header = JSON.parse(Buffer.from(pad(h), "base64").toString("utf8"));
     const payload = JSON.parse(Buffer.from(pad(p), "base64").toString("utf8"));
     return { header, payload };
@@ -69,7 +69,11 @@ async function pbiAdminFetch(pathAndQuery) {
   }
 
   let body = {};
-  try { body = text ? JSON.parse(text) : {}; } catch { body = {}; }
+  try {
+    body = text ? JSON.parse(text) : {};
+  } catch {
+    body = {};
+  }
   return { ok: true, status: res.status, body };
 }
 
@@ -103,10 +107,9 @@ function buildMcpServer() {
     version: "1.1.0",
   });
 
-  // Helper to return errors to Claude instead of throwing
-  const toErrorContent = (prefix, res) => ([
-    { type: "text", text: `${prefix}: HTTP ${res.status}\n${res.errorText ?? "No body"}` }
-  ]);
+  const toErrorContent = (prefix, res) => [
+    { type: "text", text: `${prefix}: HTTP ${res.status}\n${res.errorText ?? "No body"}` },
+  ];
 
   // 0) Diagnostics: quick ping to admin API
   server.tool(
@@ -135,7 +138,6 @@ function buildMcpServer() {
         const decoded = decodeJwtNoVerify(token);
         if (!decoded) return { content: [{ type: "text", text: "Unable to decode token" }] };
         const { header, payload } = decoded;
-        // Redact the token but return safe fields
         const subset = {
           header,
           payload: {
@@ -149,7 +151,7 @@ function buildMcpServer() {
             iat: payload.iat,
             nbf: payload.nbf,
             exp: payload.exp,
-          }
+          },
         };
         return { content: [{ type: "json", json: subset }] };
       } catch (e) {
@@ -224,24 +226,48 @@ function buildMcpServer() {
 
 // ---------- Express App ----------
 const app = express();
-app.use(express.json());
 
-// Minimal logs
-app.use((req, _res, next) => {
-  console.log(
-    "[REQ]",
-    req.method,
-    req.path,
-    "ctype:", req.header("content-type"),
-    "mcp-session:", req.header("Mcp-Session-Id")
+// CORS + preflight (adjust origin if you want to restrict it)
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, MCP-Session, MCP-Session-Id, X-MCP-Session"
   );
+  res.setHeader(
+    "Access-Control-Expose-Headers",
+    "MCP-Session, MCP-Session-Id, X-MCP-Session"
+  );
+  if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
 
-// Friendly routes
+app.use(express.json());
+
+// Minimal logs (look for common session header variants)
+app.use((req, _res, next) => {
+  const ct = req.get("content-type");
+  const sid =
+    req.get("mcp-session") ||
+    req.get("mcp-session-id") ||
+    req.get("x-mcp-session");
+  console.log("[REQ]", req.method, req.path, "ctype:", ct, "mcp-session:", sid);
+  next();
+});
+
+// Friendly routes for platforms like Render
+app.get("/", (_req, res) => res.status(200).send("ok"));
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// Explicitly 404 well-known OAuth probes if you don't support OAuth
+app.get("/.well-known/*", (_req, res) => res.sendStatus(404));
+
+// GET liveness for MCP base path
 app.get(BASE_PATH, (_req, res) =>
-  res.json({ ok: true, info: "MCP endpoint. POST JSON-RPC initialize first, then tools/call." })
+  res.json({
+    ok: true,
+    info: "MCP endpoint. POST JSON-RPC initialize first, then tools/call.",
+  })
 );
 
 // ---------- MCP Transport (SDK manages sessions) ----------
@@ -251,9 +277,16 @@ const transport = new StreamableHTTPServerTransport({
 const mcpServer = buildMcpServer();
 mcpServer.connect(transport);
 
-// Single handler for MCP endpoint
+// Single handler for MCP endpoint (both GET probes and POST JSON-RPC)
 app.all(BASE_PATH, async (req, res) => {
-  await transport.handleRequest(req, res, req.body);
+  try {
+    await transport.handleRequest(req, res, req.body);
+  } catch (e) {
+    console.error("[MCP handleRequest error]", e);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "MCP transport error", detail: String(e) });
+    }
+  }
 });
 
 // ---------- Start ----------
