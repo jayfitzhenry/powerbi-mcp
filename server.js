@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+
+// ---------- Imports ----------
 import 'dotenv/config';
 import express from "express";
 import fetch from "node-fetch";
@@ -7,22 +9,24 @@ import { ConfidentialClientApplication } from "@azure/msal-node";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-// -------- ENV --------
+// ---------- Environment Variables ----------
 const {
   TENANT_ID,
   CLIENT_ID,
   CLIENT_SECRET,
   API_KEY,
-  PORT = "8787",
+  PORT = process.env.PORT || "8787",
   BASE_PATH = "/mcp",
 } = process.env;
+
+console.log("ENV OK?", !!TENANT_ID, !!CLIENT_ID, !!CLIENT_SECRET, !!API_KEY);
 
 if (!TENANT_ID || !CLIENT_ID || !CLIENT_SECRET || !API_KEY) {
   console.error("Missing required env: TENANT_ID, CLIENT_ID, CLIENT_SECRET, API_KEY");
   process.exit(1);
 }
 
-// -------- MSAL (Power BI) --------
+// ---------- Power BI Auth (MSAL) ----------
 const cca = new ConfidentialClientApplication({
   auth: {
     clientId: CLIENT_ID,
@@ -47,7 +51,7 @@ async function pbiAdminFetch(pathAndQuery) {
   return { status: res.status, body: await res.json() };
 }
 
-// -------- MCP server definition --------
+// ---------- MCP Server Definition ----------
 function buildMcpServer() {
   const server = new McpServer({
     name: "powerbi-admin-mcp-remote",
@@ -66,28 +70,48 @@ function buildMcpServer() {
     async (input) => {
       const top = input?.top ?? 100;
       const result = await pbiAdminFetch(`/groups?scope=Organization&$top=${top}`);
-      return {
-  content: [{ type: "json", json: result.body }],
-};
-
+      return { content: [{ type: "json", json: result.body }] };
     }
   );
 
   return server;
 }
 
-// -------- HTTP wiring --------
+// ---------- Express Setup ----------
 const app = express();
 app.use(express.json());
 
-// Simple API key check
-//app.use((req, res, next) => {
-//  if (req.header("Authorization") !== `Bearer ${API_KEY}`) {
-//    return res.status(401).json({ error: "Unauthorized" });
-//  }
-//  next();
-//});
+// Log each request (helpful for debugging)
+app.use((req, _res, next) => {
+  console.log(
+    "[REQ]",
+    req.method,
+    req.path,
+    "auth:", !!req.header("Authorization"),
+    "session:", req.header("Mcp-Session-Id"),
+    "ctype:", req.header("content-type")
+  );
+  next();
+});
 
+// ---------- Auth Middleware ----------
+// Allow "initialize" without auth, require API key for everything else.
+app.use((req, res, next) => {
+  if (req.path !== BASE_PATH) return next();
+
+  if (req.method === "POST" && req.body?.method === "initialize") {
+    return next(); // allow Claude to start without auth
+  }
+
+  const isAuthed = req.header("Authorization") === `Bearer ${API_KEY}`;
+  if (!isAuthed) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  next();
+});
+
+// ---------- MCP Session Handling ----------
 const sessions = new Map();
 
 function newTransport() {
@@ -121,6 +145,17 @@ app.all(BASE_PATH, async (req, res) => {
   await session.transport.handleRequest(req, res, req.body);
 });
 
+// ---------- Helpful Routes ----------
+app.get(BASE_PATH, (_req, res) => {
+  res.json({
+    ok: true,
+    info: "MCP endpoint ready. Send JSON-RPC initialize first, then tools/call.",
+  });
+});
+
+app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// ---------- Start Server ----------
 app.listen(Number(PORT), () => {
   console.log(`✅ MCP server running on port ${PORT} at ${BASE_PATH}`);
 });
