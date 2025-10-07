@@ -134,7 +134,7 @@ function buildMcpServer() {
     async () => {
       const r = await pbiAdminFetch(`/capacities?$top=1`);
       if (!r.ok) return { content: toErrorContent("Admin ping failed", r) };
-      return { content: [{ type: "json", json: r.body }] };
+      return { content: [{ type: "text", text: JSON.stringify(r.body, null, 2) }] };
     }
   );
 
@@ -164,7 +164,7 @@ function buildMcpServer() {
             exp: payload.exp,
           }
         };
-        return { content: [{ type: "json", json: subset }] };
+        return { content: [{ type: "text", text: JSON.stringify(subset, null, 2) }] };
       } catch (e) {
         return { content: [{ type: "text", text: `Token error: ${String(e)}` }] };
       }
@@ -182,7 +182,7 @@ function buildMcpServer() {
       const top = input?.top ?? 100;
       const r = await pbiAdminFetch(`/groups?scope=Organization&$top=${top}`);
       if (!r.ok) return { content: toErrorContent("list_admin_groups failed", r) };
-      return { content: [{ type: "json", json: r.body }] };
+      return { content: [{ type: "text", text: JSON.stringify(r.body, null, 2) }] };
     }
   );
 
@@ -196,7 +196,7 @@ function buildMcpServer() {
     async () => {
       const r = await pbiAdminCount(`/datasets?scope=Organization`);
       if (!r.ok) return { content: toErrorContent("count_admin_datasets failed", r) };
-      return { content: [{ type: "json", json: { datasetsCount: r.total } }] };
+      return { content: [{ type: "text", text: JSON.stringify({ datasetsCount: r.total }, null, 2) }] };
     }
   );
 
@@ -210,7 +210,7 @@ function buildMcpServer() {
     async () => {
       const r = await pbiAdminCount(`/reports?scope=Organization`);
       if (!r.ok) return { content: toErrorContent("count_admin_reports failed", r) };
-      return { content: [{ type: "json", json: { reportsCount: r.total } }] };
+      return { content: [{ type: "text", text: JSON.stringify({ reportsCount: r.total }, null, 2) }] };
     }
   );
 
@@ -228,7 +228,7 @@ function buildMcpServer() {
       ]);
       if (!d.ok) return { content: toErrorContent("datasets part failed", d) };
       if (!r.ok) return { content: toErrorContent("reports part failed", r) };
-      return { content: [{ type: "json", json: { datasetsCount: d.total, reportsCount: r.total } }] };
+      return { content: [{ type: "text", text: JSON.stringify({ datasetsCount: d.total, reportsCount: r.total }, null, 2) }] };
     }
   );
 
