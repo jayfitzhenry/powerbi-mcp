@@ -31,17 +31,27 @@ const cca = new ConfidentialClientApplication({
     authority: `https://login.microsoftonline.com/${TENANT_ID}`,
     clientSecret: CLIENT_SECRET,
   },
+  system: {
+    loggerOptions: {
+      logLevel: "Info",
+      loggerCallback: (level, message) => {
+        console.log(`[MSAL ${level}] ${message}`);
+      }
+    }
+  }
 });
 
 async function getAccessToken() {
   const tokenResponse = await cca.acquireTokenByClientCredential({
     scopes: ["https://analysis.windows.net/powerbi/api/.default"],
+    skipCache: false, // Add explicit cache setting
   });
   if (!tokenResponse?.accessToken) throw new Error("Failed to acquire Power BI token");
   
   // Temporary diagnostic logging
   const decoded = decodeJwtNoVerify(tokenResponse.accessToken);
   console.log("TOKEN CLAIMS:", JSON.stringify(decoded?.payload, null, 2));
+  console.log("TOKEN SOURCE:", tokenResponse.fromCache ? "cache" : "new");
   
   return tokenResponse.accessToken;
 }
