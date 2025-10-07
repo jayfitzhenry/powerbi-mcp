@@ -41,7 +41,7 @@ async function getAccessToken() {
   return tokenResponse.accessToken;
 }
 
-// Decode JWT (header/payload only, no verify) for diagnostics
+// Decode JWT (header/payload only) for diagnostics
 function decodeJwtNoVerify(jwt) {
   try {
     const [h, p] = jwt.split(".");
@@ -105,7 +105,7 @@ async function pbiAdminCount(pathBaseWithScope, pageSize = 5000) {
 function buildMcpServer() {
   const server = new McpServer({
     name: "powerbi-admin-mcp-remote",
-    version: "1.2.0",
+    version: "1.3.0",
   });
 
   const toErrorContent = (prefix, res) => ([
@@ -242,17 +242,11 @@ app.use((req, _res, next) => {
 // Health/info
 app.get("/health", (_req, res) => res.json({ ok: true }));
 app.get(BASE_PATH, (_req, res) =>
-  res.json({ ok: true, info: "MCP endpoint. Register a session, then initialize, then tools/call." })
+  res.json({ ok: true, info: "MCP endpoint. Initialize (no session ok) OR register -> initialize -> tools/call." })
 );
 
-// ---------- Session management (explicit) ----------
-/**
- * Flow:
- * 1) POST /register -> returns Mcp-Session-Id and prepares a transport bound to that id
- * 2) POST /mcp (initialize/tools) must include Mcp-Session-Id from step 1
- */
+// ---------- Session management ----------
 const sessions = new Map(); // sid -> { transport, server }
-
 function createSession(sessionId) {
   const server = buildMcpServer();
   const transport = new StreamableHTTPServerTransport({
@@ -262,16 +256,30 @@ function createSession(sessionId) {
   sessions.set(sessionId, { transport, server });
 }
 
-app.post("/register", (req, res) => {
+// Optional explicit registration (useful for Postman/manual)
+app.post("/register", (_req, res) => {
   const sid = uuidv4();
   createSession(sid);
   res.setHeader("Mcp-Session-Id", sid);
   return res.status(201).json({ ok: true, mcpSessionId: sid });
 });
 
-// ---------- MCP endpoint (requires session id) ----------
+// ---------- MCP endpoint ----------
+// Supports two modes:
+//   A) No Mcp-Session-Id + initialize  -> auto-creates session and proceeds
+//   B) Mcp-Session-Id present          -> uses existing session
 app.all(BASE_PATH, async (req, res) => {
-  const sid = req.header("Mcp-Session-Id");
+  let sid = req.header("Mcp-Session-Id");
+  const method = req.body?.method;
+
+  // A) Auto-session on initialize with no header (Claude web behavior)
+  if (!sid && req.method === "POST" && method === "initialize") {
+    sid = uuidv4();
+    createSession(sid);
+    res.setHeader("Mcp-Session-Id", sid);
+  }
+
+  // After auto-create, we should have a session id
   if (!sid) {
     return res.status(400).json({ error: "Bad Request: Mcp-Session-Id header is required" });
   }
@@ -280,13 +288,11 @@ app.all(BASE_PATH, async (req, res) => {
     return res.status(404).json({ error: "Session not found" });
   }
 
-  // Enforce Accept header for Streamable HTTP
+  // Be lenient on Accept header (Claude may omit it); only warn in logs
   const accept = (req.header("Accept") || "").toLowerCase();
   if (!accept.includes("application/json") || !accept.includes("text/event-stream")) {
-    return res.status(406).json({
-      error: "Not Acceptable: Client must accept both application/json and text/event-stream"
-    });
-    }
+    console.warn("[WARN] Accept header missing required values; continuing anyway.");
+  }
 
   await session.transport.handleRequest(req, res, req.body);
 });
