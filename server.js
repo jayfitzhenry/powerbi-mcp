@@ -25,28 +25,93 @@ if (!TENANT_ID || !CLIENT_ID || !CLIENT_SECRET) {
 }
 
 // ---------- Power BI Auth (MSAL) ----------
+// IMPORTANT: For Service Principal authentication with Power BI Admin APIs:
+// 1. DO NOT add Power BI Service API permissions (Tenant.Read.All, etc.) in Azure AD
+//    - Service principals inherit permissions from Power BI tenant settings only
+//    - Azure AD permissions conflict with Admin API access
+// 2. Required Power BI tenant settings (in Power BI Admin Portal):
+//    - Developer Settings: "Allow service principals to use Power BI APIs"
+//    - Admin API Settings: "Service principals can access read-only admin APIs"
+// 3. Add the service principal to a security group specified in both settings above
+
 const cca = new ConfidentialClientApplication({
   auth: {
     clientId: CLIENT_ID,
     authority: `https://login.microsoftonline.com/${TENANT_ID}`,
     clientSecret: CLIENT_SECRET,
   },
-  system: {
-    loggerOptions: {
-      logLevel: "Info",
-      loggerCallback: (level, message) => {
-        console.log(`[MSAL ${level}] ${message}`);
-      }
-    }
-  }
 });
 
 async function getAccessToken() {
   const tokenResponse = await cca.acquireTokenByClientCredential({
     scopes: ["https://analysis.windows.net/powerbi/api/.default"],
-    skipCache: false, // Add explicit cache setting
   });
   if (!tokenResponse?.accessToken) throw new Error("Failed to acquire Power BI token");
+  
+  return tokenResponse.accessToken;
+}
+
+// Decode JWT (header/payload only) for diagnostics
+function decodeJwtNoVerify(jwt) {
+  try {
+    const [h, p] = jwt.split(".");
+    const pad = s => s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4);
+    const header = JSON.parse(Buffer.from(pad(h), "base64").toString("utf8"));
+    const payload = JSON.parse(Buffer.from(pad(p), "base64").toString("utf8"));
+    return { header, payload };
+  } catch {
+    return null;
+  }
+}
+
+// Centralised PBI fetch with rich logging
+async function pbiAdminFetch(pathAndQuery) {
+  const token = await getAccessToken();
+  const url = `https://api.powerbi.com/v1.0/myorg/admin${pathAndQuery}`;
+
+  console.log("[PBI REQUEST]", url);
+
+  let res, text;
+  try {
+    res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    text = await res.text();
+  } catch (e) {
+    console.error("[PBI NETWORK ERROR]", url, String(e));
+    return { ok: false, status: 0, errorText: String(e) };
+  }
+
+  if (!res.ok) {
+    console.error("[PBI ERROR]", res.status, url, text);
+    return { ok: false, status: res.status, errorText: text };
+  }
+
+  let body = {};
+  try { body = text ? JSON.parse(text) : {}; } catch { body = {}; }
+  return { ok: true, status: res.status, body };
+}
+
+// Simple pager to count tenant-wide assets (datasets/reports)
+async function pbiAdminCount(pathBaseWithScope, pageSize = 5000) {
+  let skip = 0;
+  let total = 0;
+
+  while (true) {
+    const sep = pathBaseWithScope.includes("?") ? "&" : "?";
+    const path = `${pathBaseWithScope}${sep}$top=${pageSize}&$skip=${skip}`;
+    const result = await pbiAdminFetch(path);
+
+    if (!result.ok) {
+      return { ok: false, status: result.status, errorText: result.errorText };
+    }
+
+    const items = Array.isArray(result.body?.value) ? result.body.value : [];
+    total += items.length;
+    if (items.length < pageSize) break;
+    skip += pageSize;
+  }
+
+  return { ok: true, total };
+}
   
   // Temporary diagnostic logging
   const decoded = decodeJwtNoVerify(tokenResponse.accessToken);
