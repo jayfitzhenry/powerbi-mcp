@@ -42,65 +42,138 @@ async function getAccessToken() {
   return tokenResponse.accessToken;
 }
 
-// Basic fetch wrapper
+// Decode JWT (no verify) to inspect header/payload for diagnostics
+function decodeJwtNoVerify(jwt) {
+  try {
+    const [h, p] = jwt.split(".");
+    const pad = (s) => s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4);
+    const header = JSON.parse(Buffer.from(pad(h), "base64").toString("utf8"));
+    const payload = JSON.parse(Buffer.from(pad(p), "base64").toString("utf8"));
+    return { header, payload };
+  } catch {
+    return null;
+  }
+}
+
+// Centralised fetch with rich logging
 async function pbiAdminFetch(pathAndQuery) {
   const token = await getAccessToken();
   const url = `https://api.powerbi.com/v1.0/myorg/admin${pathAndQuery}`;
+
   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
   const text = await res.text();
+
   if (!res.ok) {
-    console.error("[PBI ERROR]", res.status, text);
-    throw new Error(`Power BI API error ${res.status}: ${text}`);
+    console.error("[PBI ERROR]", res.status, pathAndQuery, text);
+    return { ok: false, status: res.status, errorText: text };
   }
-  return { status: res.status, body: text ? JSON.parse(text) : {} };
+
+  let body = {};
+  try { body = text ? JSON.parse(text) : {}; } catch { body = {}; }
+  return { ok: true, status: res.status, body };
 }
 
-// Simple tenant-wide pager for endpoints that return { value: [...] }
+// Simple pager to count tenant-wide assets (datasets/reports)
 async function pbiAdminCount(pathBaseWithScope, pageSize = 5000) {
   let skip = 0;
   let total = 0;
 
   while (true) {
-    // Ensure we add the paging params correctly
     const sep = pathBaseWithScope.includes("?") ? "&" : "?";
     const path = `${pathBaseWithScope}${sep}$top=${pageSize}&$skip=${skip}`;
-    const { body } = await pbiAdminFetch(path);
+    const result = await pbiAdminFetch(path);
 
-    const items = Array.isArray(body?.value) ? body.value : [];
+    if (!result.ok) {
+      return { ok: false, status: result.status, errorText: result.errorText };
+    }
+
+    const items = Array.isArray(result.body?.value) ? result.body.value : [];
     total += items.length;
-
-    if (items.length < pageSize) break; // last page
+    if (items.length < pageSize) break;
     skip += pageSize;
   }
 
-  return total;
+  return { ok: true, total };
 }
 
 // ---------- MCP Server (tools) ----------
 function buildMcpServer() {
   const server = new McpServer({
     name: "powerbi-admin-mcp-remote",
-    version: "1.0.0",
+    version: "1.1.0",
   });
 
-  // 1) Existing: list workspaces
+  // Helper to return errors to Claude instead of throwing
+  const toErrorContent = (prefix, res) => ([
+    { type: "text", text: `${prefix}: HTTP ${res.status}\n${res.errorText ?? "No body"}` }
+  ]);
+
+  // 0) Diagnostics: quick ping to admin API
+  server.tool(
+    "diagnose_admin_ping",
+    {
+      description: "Checks if the service principal can call /admin/capacities (tenant-level).",
+      inputSchema: { type: "object", properties: {} },
+    },
+    async () => {
+      const r = await pbiAdminFetch(`/capacities?$top=1`);
+      if (!r.ok) return { content: toErrorContent("Admin ping failed", r) };
+      return { content: [{ type: "json", json: r.body }] };
+    }
+  );
+
+  // 0b) Diagnostics: show access token claims (audience/tenant/appid/roles)
+  server.tool(
+    "diagnose_token_claims",
+    {
+      description: "Decodes the service principal token claims to verify audience/app/tenant.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    async () => {
+      try {
+        const token = await getAccessToken();
+        const decoded = decodeJwtNoVerify(token);
+        if (!decoded) return { content: [{ type: "text", text: "Unable to decode token" }] };
+        const { header, payload } = decoded;
+        // Redact the token but return safe fields
+        const subset = {
+          header,
+          payload: {
+            aud: payload.aud,
+            appid: payload.appid,
+            tid: payload.tid,
+            roles: payload.roles,
+            aio: payload.aio,
+            ver: payload.ver,
+            iss: payload.iss,
+            iat: payload.iat,
+            nbf: payload.nbf,
+            exp: payload.exp,
+          }
+        };
+        return { content: [{ type: "json", json: subset }] };
+      } catch (e) {
+        return { content: [{ type: "text", text: `Token error: ${String(e)}` }] };
+      }
+    }
+  );
+
+  // 1) List workspaces
   server.tool(
     "list_admin_groups",
     {
       description: "List Power BI workspaces across the organisation (tenant-wide).",
-      inputSchema: {
-        type: "object",
-        properties: { top: { type: "number", description: "Number to return (default 100)" } },
-      },
+      inputSchema: { type: "object", properties: { top: { type: "number" } } },
     },
     async (input) => {
       const top = input?.top ?? 100;
-      const result = await pbiAdminFetch(`/groups?scope=Organization&$top=${top}`);
-      return { content: [{ type: "json", json: result.body }] };
+      const r = await pbiAdminFetch(`/groups?scope=Organization&$top=${top}`);
+      if (!r.ok) return { content: toErrorContent("list_admin_groups failed", r) };
+      return { content: [{ type: "json", json: r.body }] };
     }
   );
 
-  // 2) NEW: count datasets across the tenant
+  // 2) Count datasets
   server.tool(
     "count_admin_datasets",
     {
@@ -108,12 +181,13 @@ function buildMcpServer() {
       inputSchema: { type: "object", properties: {} },
     },
     async () => {
-      const total = await pbiAdminCount(`/datasets?scope=Organization`);
-      return { content: [{ type: "json", json: { datasetsCount: total } }] };
+      const r = await pbiAdminCount(`/datasets?scope=Organization`);
+      if (!r.ok) return { content: toErrorContent("count_admin_datasets failed", r) };
+      return { content: [{ type: "json", json: { datasetsCount: r.total } }] };
     }
   );
 
-  // 3) NEW: count reports across the tenant
+  // 3) Count reports
   server.tool(
     "count_admin_reports",
     {
@@ -121,12 +195,13 @@ function buildMcpServer() {
       inputSchema: { type: "object", properties: {} },
     },
     async () => {
-      const total = await pbiAdminCount(`/reports?scope=Organization`);
-      return { content: [{ type: "json", json: { reportsCount: total } }] };
+      const r = await pbiAdminCount(`/reports?scope=Organization`);
+      if (!r.ok) return { content: toErrorContent("count_admin_reports failed", r) };
+      return { content: [{ type: "json", json: { reportsCount: r.total } }] };
     }
   );
 
-  // 4) NEW: combined counts (datasets + reports)
+  // 4) Combined counts
   server.tool(
     "count_admin_assets",
     {
@@ -134,11 +209,13 @@ function buildMcpServer() {
       inputSchema: { type: "object", properties: {} },
     },
     async () => {
-      const [datasetsCount, reportsCount] = await Promise.all([
+      const [d, r] = await Promise.all([
         pbiAdminCount(`/datasets?scope=Organization`),
         pbiAdminCount(`/reports?scope=Organization`),
       ]);
-      return { content: [{ type: "json", json: { datasetsCount, reportsCount } }] };
+      if (!d.ok) return { content: toErrorContent("datasets part failed", d) };
+      if (!r.ok) return { content: toErrorContent("reports part failed", r) };
+      return { content: [{ type: "json", json: { datasetsCount: d.total, reportsCount: r.total } }] };
     }
   );
 
@@ -149,7 +226,7 @@ function buildMcpServer() {
 const app = express();
 app.use(express.json());
 
-// Minimal logs (helpful if anything fails)
+// Minimal logs
 app.use((req, _res, next) => {
   console.log(
     "[REQ]",
