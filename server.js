@@ -199,7 +199,26 @@ function buildMcpServer() {
       return { content: [{ type: "text", text: JSON.stringify({ datasetsCount: r.total }, null, 2) }] };
     }
   );
-
+// Get all reports across organization
+server.tool(
+  "get_admin_reports",
+  {
+    description: "Returns all reports across the organization with details. Supports pagination.",
+    inputSchema: { 
+      type: "object", 
+      properties: { 
+        top: { type: "number", description: "Number of results per page", default: 100 },
+        skip: { type: "number", description: "Number of results to skip", default: 0 }
+      }
+    },
+  },
+  async (input) => {
+    const { top = 100, skip = 0 } = input || {};
+    const r = await pbiAdminFetch(`/reports?$top=${top}&$skip=${skip}`);
+    if (!r.ok) return { content: toErrorContent("get_admin_reports failed", r) };
+    return { content: [{ type: "text", text: JSON.stringify(r.body, null, 2) }] };
+  }
+);
   // Count reports
   server.tool(
     "count_admin_reports",
@@ -729,6 +748,27 @@ server.tool(
     try { responseBody = text ? JSON.parse(text) : {}; } catch { responseBody = {}; }
     
     return { content: [{ type: "text", text: JSON.stringify(responseBody, null, 2) }] };
+  }
+);
+
+// Get detailed report information
+server.tool(
+  "get_admin_report_details",
+  {
+    description: "Returns detailed information about a specific report including name, description, dataset, web URL, and metadata.",
+    inputSchema: { 
+      type: "object", 
+      properties: { 
+        reportId: { type: "string", description: "The report ID (GUID)" }
+      },
+      required: ["reportId"]
+    },
+  },
+  async (input) => {
+    const { reportId } = input;
+    const r = await pbiAdminFetch(`/reports/${reportId}`);
+    if (!r.ok) return { content: toErrorContent("get_admin_report_details failed", r) };
+    return { content: [{ type: "text", text: JSON.stringify(r.body, null, 2) }] };
   }
 );
 
