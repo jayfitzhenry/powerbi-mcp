@@ -9,24 +9,24 @@ import { ConfidentialClientApplication } from "@azure/msal-node";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-// ---------- Environment Variables ----------
+// ---------- Environment ----------
 const {
   TENANT_ID,
   CLIENT_ID,
   CLIENT_SECRET,
-  API_KEY,
+  // API_KEY,  // (disabled for now so Claude web can connect)
   PORT = process.env.PORT || "8787",
   BASE_PATH = "/mcp",
 } = process.env;
 
-console.log("ENV OK?", !!TENANT_ID, !!CLIENT_ID, !!CLIENT_SECRET, !!API_KEY);
+console.log("ENV OK?", !!TENANT_ID, !!CLIENT_ID, !!CLIENT_SECRET);
 
-if (!TENANT_ID || !CLIENT_ID || !CLIENT_SECRET || !API_KEY) {
-  console.error("Missing required env: TENANT_ID, CLIENT_ID, CLIENT_SECRET, API_KEY");
+// ---------- Power BI Auth (MSAL) ----------
+if (!TENANT_ID || !CLIENT_ID || !CLIENT_SECRET) {
+  console.error("Missing required env: TENANT_ID, CLIENT_ID, CLIENT_SECRET");
   process.exit(1);
 }
 
-// ---------- Power BI Auth (MSAL) ----------
 const cca = new ConfidentialClientApplication({
   auth: {
     clientId: CLIENT_ID,
@@ -51,7 +51,7 @@ async function pbiAdminFetch(pathAndQuery) {
   return { status: res.status, body: await res.json() };
 }
 
-// ---------- MCP Server Definition ----------
+// ---------- MCP Server (tools) ----------
 function buildMcpServer() {
   const server = new McpServer({
     name: "powerbi-admin-mcp-remote",
@@ -74,100 +74,50 @@ function buildMcpServer() {
     }
   );
 
+  // You can add more tools here (e.g., admin_get, get_activity_events)
+
   return server;
 }
 
-// ---------- Express Setup ----------
+// ---------- Express App ----------
 const app = express();
 app.use(express.json());
 
-// Log each request (helpful for debugging)
+// Request logger (helps debugging)
 app.use((req, _res, next) => {
   console.log(
     "[REQ]",
     req.method,
     req.path,
-    "auth:", !!req.header("Authorization"),
-    "session:", req.header("Mcp-Session-Id"),
-    "ctype:", req.header("content-type")
+    "ctype:", req.header("content-type"),
+    "mcp-session:", req.header("Mcp-Session-Id")
   );
   next();
 });
 
-// ---------- Auth Middleware ----------
-// Allow 'initialize' with no auth.
-// After that, allow any request that includes a valid Mcp-Session-Id
-// (i.e., part of an established MCP session). If neither, require API_KEY.
-
-app.use((req, res, next) => {
-  if (req.path !== BASE_PATH) return next();
-
-  // 1) Allow initialize without auth
-  if (req.method === "POST" && req.body?.method === "initialize") {
-    return next();
-  }
-
-  // 2) Allow any request that belongs to an existing MCP session
-  const sid = req.header("Mcp-Session-Id");
-  if (sid && sessions.has(sid)) {
-    return next();
-  }
-
-  // 3) Fallback: allow with API key header (for curl/tests/desktop)
-  const isAuthed = req.header("Authorization") === `Bearer ${API_KEY}`;
-  if (isAuthed) {
-    return next();
-  }
-
-  // 4) Otherwise block
-  return res.status(401).json({ error: "Unauthorized" });
-});
-
-// ---------- MCP Session Handling ----------
-const sessions = new Map();
-
-function newTransport() {
-  const transport = new StreamableHTTPServerTransport();
-  const server = buildMcpServer();
-  server.connect(transport);
-  return { transport };
-}
-
-app.all(BASE_PATH, async (req, res) => {
-  const sessionId = req.header("Mcp-Session-Id");
-  let session = sessions.get(sessionId);
-
-  const isInit = req.method === "POST" && req.body?.method === "initialize";
-  if (!session && !isInit) return res.status(400).json({ error: "Send initialize first" });
-
-  if (isInit) {
-    const { transport } = newTransport();
-    const id = uuidv4();
-    sessions.set(id, { transport });
-    res.setHeader("Mcp-Session-Id", id);
-    await transport.handleRequest(req, res, req.body);
-    return;
-  }
-
-  if (req.method === "DELETE") {
-    sessions.delete(sessionId);
-    return res.status(204).end();
-  }
-
-  await session.transport.handleRequest(req, res, req.body);
-});
-
-// ---------- Helpful Routes ----------
-app.get(BASE_PATH, (_req, res) => {
-  res.json({
-    ok: true,
-    info: "MCP endpoint ready. Send JSON-RPC initialize first, then tools/call.",
-  });
-});
-
+// Friendly routes
 app.get("/health", (_req, res) => res.json({ ok: true }));
+app.get(BASE_PATH, (_req, res) =>
+  res.json({ ok: true, info: "MCP endpoint. POST JSON-RPC initialize first, then tools/call." })
+);
 
-// ---------- Start Server ----------
+// ---------- Streamable HTTP Transport (let it manage sessions) ----------
+const transport = new StreamableHTTPServerTransport({
+  // Newer SDKs require options; this generates session ids for you
+  sessionIdGenerator: () => uuidv4(),
+});
+
+const mcpServer = buildMcpServer();
+mcpServer.connect(transport);
+
+// Single handler for the MCP endpoint
+app.all(BASE_PATH, async (req, res) => {
+  // No custom auth for now -> Claude web can connect
+  // (If you later want auth, we can add rules that still allow initialize/session)
+  await transport.handleRequest(req, res, req.body);
+});
+
+// ---------- Start ----------
 app.listen(Number(PORT), () => {
   console.log(`✅ MCP server running on port ${PORT} at ${BASE_PATH}`);
 });
