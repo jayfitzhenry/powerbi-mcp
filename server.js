@@ -38,6 +38,11 @@ async function getAccessToken() {
     scopes: ["https://analysis.windows.net/powerbi/api/.default"],
   });
   if (!tokenResponse?.accessToken) throw new Error("Failed to acquire Power BI token");
+  
+  // Temporary diagnostic logging
+  const decoded = decodeJwtNoVerify(tokenResponse.accessToken);
+  console.log("TOKEN CLAIMS:", JSON.stringify(decoded?.payload, null, 2));
+  
   return tokenResponse.accessToken;
 }
 
