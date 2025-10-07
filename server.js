@@ -203,7 +203,7 @@ function buildMcpServer() {
       inputSchema: { type: "object", properties: {} },
     },
     async () => {
-      const r = await pbiAdminCount(`/reports`);
+      const r = await pbiAdminCount(`/reports?scope=Organization`);
       if (!r.ok) return { content: toErrorContent("count_admin_reports failed", r) };
       return { content: [{ type: "json", json: { reportsCount: r.total } }] };
     }
